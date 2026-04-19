@@ -941,11 +941,11 @@ test "basic compression roundtrip" {
     try std.testing.expect(std.mem.eql(u8, decompressed, src));
 }
 
-// test "compress bound" {
-//     try std.testing.expect(ZSTD_compressBound(0) == 0);
-//     try std.testing.expect(ZSTD_compressBound(100) > 100);
-//     try std.testing.expect(ZSTD_compressBound(ZSTD_MAX_INPUT_SIZE) == 0);
-// }
+test "compress bound" {
+    try std.testing.expect(ZSTD_compressBound(0) == 0);
+    try std.testing.expect(ZSTD_compressBound(100) > 100);
+    try std.testing.expect(ZSTD_compressBound(ZSTD_MAX_INPUT_SIZE) == 0);
+}
 
 test "version" {
     try std.testing.expect(ZSTD_versionNumber() == 10600);

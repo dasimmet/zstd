@@ -1,7 +1,6 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const upstream = b.dependency("zstd", .{});
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -31,92 +30,6 @@ pub fn build(b: *std.Build) void {
     const exclude_compressors_dfast_and_up = b.option(bool, "exclude-compressors-dfast-and-up", "") orelse false;
     const exclude_compressors_greedy_and_up = b.option(bool, "exclude-compressors-greedy-and-up", "") orelse false;
 
-    const zstd = b.addLibrary(.{
-        .linkage = linkage,
-        .name = "zstd",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-            .strip = strip,
-            .pic = pic,
-            .link_libc = true,
-        }),
-    });
-    b.installArtifact(zstd);
-    zstd.root_module.addCSourceFiles(.{ .root = upstream.path("lib"), .files = common_sources });
-    // zstd does not install into its own subdirectory. :(
-    zstd.installHeader(upstream.path("lib/zstd.h"), "zstd.h");
-    zstd.installHeader(upstream.path("lib/zdict.h"), "zdict.h");
-    zstd.installHeader(upstream.path("lib/zstd_errors.h"), "zstd_errors.h");
-    if (compression) zstd.root_module.addCSourceFiles(.{ .root = upstream.path("lib"), .files = compression_sources });
-    if (decompression) zstd.root_module.addCSourceFiles(.{ .root = upstream.path("lib"), .files = decompress_sources });
-    if (dictbuilder) zstd.root_module.addCSourceFiles(.{ .root = upstream.path("lib"), .files = dict_builder_sources });
-    if (deprecated) zstd.root_module.addCSourceFiles(.{ .root = upstream.path("lib"), .files = deprecated_sources });
-    if (legacy_support != 0) {
-        for (legacy_support..8) |i| zstd.root_module.addCSourceFile(.{ .file = upstream.path(b.fmt("lib/legacy/zstd_v0{d}.c", .{i})) });
-    }
-
-    if (target.result.cpu.arch == .x86_64) {
-        if (decompression) {
-            zstd.root_module.addAssemblyFile(upstream.path("lib/decompress/huf_decompress_amd64.S"));
-        }
-    } else {
-        zstd.root_module.addCMacro("ZSTD_DISABLE_ASM", "");
-    }
-
-    zstd.root_module.addCMacro("ZSTD_LEGACY_SUPPORT", b.fmt("{d}", .{legacy_support}));
-    if (multi_thread) zstd.root_module.addCMacro("ZSTD_MULTITHREAD", "1");
-    if (disable_assembly) zstd.root_module.addCMacro("ZSTD_DISABLE_ASM", "");
-    if (huf_force_decompress_x1) zstd.root_module.addCMacro("HUF_FORCE_DECOMPRESS_X1", "");
-    if (huf_force_decompress_x2) zstd.root_module.addCMacro("HUF_FORCE_DECOMPRESS_X2", "");
-    if (force_decompress_sequences_short) zstd.root_module.addCMacro("ZSTD_FORCE_DECOMPRESS_SEQUENCES_SHORT", "");
-    if (force_decompress_sequences_long) zstd.root_module.addCMacro("ZSTD_FORCE_DECOMPRESS_SEQUENCES_LONG", "");
-    if (no_inline) zstd.root_module.addCMacro("ZSTD_NO_INLINE", "");
-    if (strip_error_strings) zstd.root_module.addCMacro("ZSTD_STRIP_ERROR_STRINGS", "");
-    if (exclude_compressors_dfast_and_up) {
-        zstd.root_module.addCMacro("ZSTD_EXCLUDE_DFAST_BLOCK_COMPRESSOR", "");
-        zstd.root_module.addCMacro("ZSTD_EXCLUDE_GREEDY_BLOCK_COMPRESSOR", "");
-        zstd.root_module.addCMacro("ZSTD_EXCLUDE_LAZY2_BLOCK_COMPRESSOR", "");
-        zstd.root_module.addCMacro("ZSTD_EXCLUDE_BTLAZY2_BLOCK_COMPRESSOR", "");
-        zstd.root_module.addCMacro("ZSTD_EXCLUDE_BTOPT_BLOCK_COMPRESSOR", "");
-        zstd.root_module.addCMacro("ZSTD_EXCLUDE_BTULTRA_BLOCK_COMPRESSOR", "");
-    }
-    if (exclude_compressors_greedy_and_up) {
-        zstd.root_module.addCMacro("ZSTD_EXCLUDE_GREEDY_BLOCK_COMPRESSOR", "");
-        zstd.root_module.addCMacro("ZSTD_EXCLUDE_LAZY2_BLOCK_COMPRESSOR", "");
-        zstd.root_module.addCMacro("ZSTD_EXCLUDE_BTLAZY2_BLOCK_COMPRESSOR", "");
-        zstd.root_module.addCMacro("ZSTD_EXCLUDE_BTOPT_BLOCK_COMPRESSOR", "");
-        zstd.root_module.addCMacro("ZSTD_EXCLUDE_BTULTRA_BLOCK_COMPRESSOR", "");
-    }
-
-    {
-        const examples: []const []const u8 = &.{
-            "simple_compression",
-            "simple_decompression",
-            "multiple_simple_compression",
-            "dictionary_compression",
-            "dictionary_decompression",
-            "streaming_compression",
-            "streaming_decompression",
-            "multiple_streaming_compression",
-            "streaming_memory_usage",
-        };
-
-        for (examples) |name| {
-            const exe = b.addExecutable(.{
-                .name = name,
-                .root_module = b.createModule(.{
-                    .target = target,
-                    .optimize = optimize,
-                }),
-            });
-            exe.root_module.addCSourceFile(.{ .file = upstream.path(b.fmt("examples/{s}.c", .{name})) });
-            exe.root_module.addIncludePath(upstream.path("examples/common.c"));
-            exe.root_module.linkLibrary(zstd);
-            b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = "examples" } } }).step);
-        }
-    }
-
     const mod = b.addModule("zstd", .{
         .target = target,
         .optimize = optimize,
@@ -127,7 +40,99 @@ pub fn build(b: *std.Build) void {
         .root_module = mod,
     });
     const test_run = b.addRunArtifact(tests);
-    b.step("test", "Run zstd tests").dependOn(&test_run.step);
+    const test_step = b.step("test", "Run zstd tests");
+    test_step.dependOn(&test_run.step);
+
+    if (b.option(bool, "clib", "enable the clib dependency") orelse false) {
+        if (b.lazyDependency("zstd", .{})) |upstream| {
+            const cmod = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .strip = strip,
+                .pic = pic,
+                .link_libc = true,
+            });
+            const clib = b.addLibrary(.{
+                .linkage = linkage,
+                .name = "zstd",
+                .root_module = cmod,
+            });
+            b.installArtifact(clib);
+            cmod.addCSourceFiles(.{ .root = upstream.path("lib"), .files = common_sources });
+            // zstd does not install into its own subdirectory. :(
+            clib.installHeader(upstream.path("lib/zstd.h"), "zstd.h");
+            clib.installHeader(upstream.path("lib/zdict.h"), "zdict.h");
+            clib.installHeader(upstream.path("lib/zstd_errors.h"), "zstd_errors.h");
+            if (compression) cmod.addCSourceFiles(.{ .root = upstream.path("lib"), .files = compression_sources });
+            if (decompression) cmod.addCSourceFiles(.{ .root = upstream.path("lib"), .files = decompress_sources });
+            if (dictbuilder) cmod.addCSourceFiles(.{ .root = upstream.path("lib"), .files = dict_builder_sources });
+            if (deprecated) cmod.addCSourceFiles(.{ .root = upstream.path("lib"), .files = deprecated_sources });
+            if (legacy_support != 0) {
+                for (legacy_support..8) |i| cmod.addCSourceFile(.{ .file = upstream.path(b.fmt("lib/legacy/zstd_v0{d}.c", .{i})) });
+            }
+
+            if (target.result.cpu.arch == .x86_64) {
+                if (decompression) {
+                    cmod.addAssemblyFile(upstream.path("lib/decompress/huf_decompress_amd64.S"));
+                }
+            } else {
+                cmod.addCMacro("ZSTD_DISABLE_ASM", "");
+            }
+
+            cmod.addCMacro("ZSTD_LEGACY_SUPPORT", b.fmt("{d}", .{legacy_support}));
+            if (multi_thread) cmod.addCMacro("ZSTD_MULTITHREAD", "1");
+            if (disable_assembly) cmod.addCMacro("ZSTD_DISABLE_ASM", "");
+            if (huf_force_decompress_x1) cmod.addCMacro("HUF_FORCE_DECOMPRESS_X1", "");
+            if (huf_force_decompress_x2) cmod.addCMacro("HUF_FORCE_DECOMPRESS_X2", "");
+            if (force_decompress_sequences_short) cmod.addCMacro("ZSTD_FORCE_DECOMPRESS_SEQUENCES_SHORT", "");
+            if (force_decompress_sequences_long) cmod.addCMacro("ZSTD_FORCE_DECOMPRESS_SEQUENCES_LONG", "");
+            if (no_inline) cmod.addCMacro("ZSTD_NO_INLINE", "");
+            if (strip_error_strings) cmod.addCMacro("ZSTD_STRIP_ERROR_STRINGS", "");
+            if (exclude_compressors_dfast_and_up) {
+                cmod.addCMacro("ZSTD_EXCLUDE_DFAST_BLOCK_COMPRESSOR", "");
+                cmod.addCMacro("ZSTD_EXCLUDE_GREEDY_BLOCK_COMPRESSOR", "");
+                cmod.addCMacro("ZSTD_EXCLUDE_LAZY2_BLOCK_COMPRESSOR", "");
+                cmod.addCMacro("ZSTD_EXCLUDE_BTLAZY2_BLOCK_COMPRESSOR", "");
+                cmod.addCMacro("ZSTD_EXCLUDE_BTOPT_BLOCK_COMPRESSOR", "");
+                cmod.addCMacro("ZSTD_EXCLUDE_BTULTRA_BLOCK_COMPRESSOR", "");
+            }
+            if (exclude_compressors_greedy_and_up) {
+                cmod.addCMacro("ZSTD_EXCLUDE_GREEDY_BLOCK_COMPRESSOR", "");
+                cmod.addCMacro("ZSTD_EXCLUDE_LAZY2_BLOCK_COMPRESSOR", "");
+                cmod.addCMacro("ZSTD_EXCLUDE_BTLAZY2_BLOCK_COMPRESSOR", "");
+                cmod.addCMacro("ZSTD_EXCLUDE_BTOPT_BLOCK_COMPRESSOR", "");
+                cmod.addCMacro("ZSTD_EXCLUDE_BTULTRA_BLOCK_COMPRESSOR", "");
+            }
+
+            {
+                const examples: []const []const u8 = &.{
+                    "simple_compression",
+                    "simple_decompression",
+                    "multiple_simple_compression",
+                    "dictionary_compression",
+                    "dictionary_decompression",
+                    "streaming_compression",
+                    "streaming_decompression",
+                    "multiple_streaming_compression",
+                    "streaming_memory_usage",
+                };
+
+                for (examples) |name| {
+                    const exe = b.addExecutable(.{
+                        .name = name,
+                        .root_module = b.createModule(.{
+                            .target = target,
+                            .optimize = optimize,
+                        }),
+                    });
+                    exe.root_module.addCSourceFile(.{ .file = upstream.path(b.fmt("examples/{s}.c", .{name})) });
+                    exe.root_module.addIncludePath(upstream.path("examples/common.c"));
+                    exe.root_module.linkLibrary(clib);
+                    b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = "examples" } } }).step);
+                }
+            }
+        }
+    }
 }
 
 const common_sources: []const []const u8 = &.{
