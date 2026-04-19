@@ -2,7 +2,7 @@
 
 # zstd
 
-This is [zstd](https://github.com/facebook/zstd), packaged for [Zig](https://ziglang.org/).
+This is a [zstd](https://github.com/facebook/zstd) implementation in [Zig](https://ziglang.org/).
 
 ## Installation
 
@@ -21,5 +21,5 @@ const zstd_dependency = b.dependency("zstd", .{
     .target = target,
     .optimize = optimize,
 });
-your_exe.linkLibrary(zstd_dependency.artifact("zstd"));
+your_module.linkLibrary(zstd_dependency.artifact("zstd"));
 ```

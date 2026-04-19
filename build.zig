@@ -116,6 +116,18 @@ pub fn build(b: *std.Build) void {
             b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = "examples" } } }).step);
         }
     }
+
+    const mod = b.addModule("zstd", .{
+        .target = target,
+        .optimize = optimize,
+        .root_source_file = b.path("src/zstd.zig"),
+    });
+    const tests = b.addTest(.{
+        .name = "zstd_tests",
+        .root_module = mod,
+    });
+    const test_run = b.addRunArtifact(tests);
+    b.step("test", "Run zstd tests").dependOn(&test_run.step);
 }
 
 const common_sources: []const []const u8 = &.{
