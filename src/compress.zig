@@ -413,6 +413,30 @@ pub const ZSTD_CCtx = struct {
         }
         self.allocator.free(self.workspace);
     }
+
+    /// Compress data using context
+    pub fn ZSTD_compressCCtx(
+        cctx: *ZSTD_CCtx,
+        dst: []u8,
+        src: []const u8,
+        compression_level: i32,
+    ) Error!usize {
+        // Set compression level
+        try ZSTD_CCtx_setParameter(cctx, .c_compressionLevel, compression_level);
+
+        // Reset for new compression
+        try ZSTD_CCtx_reset(cctx, .reset_session_only);
+
+        // Begin compression
+        const beginResult = try ZSTD_compressBegin(cctx, compression_level);
+        if (beginResult != 0) {
+            return Error.Generic;
+        }
+
+        // Compress the data
+        const compressResult = try ZSTD_compressEnd(cctx, dst, src);
+        return compressResult;
+    }
 };
 
 pub const ZSTD_compressionStage_e = enum {
@@ -479,31 +503,7 @@ pub fn ZSTD_compress(
     var ctx = try ZSTD_CCtx.init(std.heap.page_allocator);
     defer ctx.deinit();
 
-    return ZSTD_compressCCtx(&ctx, dst, src, compression_level);
-}
-
-/// Compress data using context
-pub fn ZSTD_compressCCtx(
-    cctx: *ZSTD_CCtx,
-    dst: []u8,
-    src: []const u8,
-    compression_level: i32,
-) Error!usize {
-    // Set compression level
-    try ZSTD_CCtx_setParameter(cctx, .c_compressionLevel, compression_level);
-
-    // Reset for new compression
-    try ZSTD_CCtx_reset(cctx, .reset_session_only);
-
-    // Begin compression
-    const beginResult = try ZSTD_compressBegin(cctx, compression_level);
-    if (beginResult != 0) {
-        return Error.Generic;
-    }
-
-    // Compress the data
-    const compressResult = try ZSTD_compressEnd(cctx, dst, src);
-    return compressResult;
+    return ctx.ZSTD_compressCCtx(dst, src, compression_level);
 }
 
 /// Begin compression
@@ -552,10 +552,6 @@ pub fn ZSTD_compressEnd(cctx: *ZSTD_CCtx, dst: []u8, src: []const u8) !usize {
         return Error.StageWrong;
     }
 
-    if (cctx.matchState == null) {
-        return Error.InitMissing;
-    }
-
     var op = dst.ptr;
     const oend = dst.ptr + dst.len;
 
@@ -563,20 +559,35 @@ pub fn ZSTD_compressEnd(cctx: *ZSTD_CCtx, dst: []u8, src: []const u8) !usize {
     const fhSize = try ZSTD_writeFrameHeader(op[0..@min(ZSTD_FRAMEHEADERSIZE_MAX, @intFromPtr(oend) - @intFromPtr(op))], &cctx.appliedParams, src.len, 0);
     op += fhSize;
 
-    // Compress the block
-    const compressedSize = ZSTD_compressBlock_fast(&cctx.matchState.?, &cctx.seqStore, &cctx.rep, src);
-    _ = compressedSize; // For now, ignore the result
+    // Write data as raw blocks
+    var srcPos: usize = 0;
+    var hasWrittenBlock = false;
 
-    // For now, write as uncompressed block
-    const blockSize = @min(cctx.blockSizeMax, src.len);
-    if (blockSize > 0) {
-        const compressedBlockSize = try ZSTD_compressBlock_simple(op[0 .. @intFromPtr(oend) - @intFromPtr(op)], src[0..blockSize]);
-        op += compressedBlockSize;
+    while (srcPos < src.len) {
+        const remainingSize = src.len - srcPos;
+        const blockSize = @min(cctx.blockSizeMax, remainingSize);
+        const isLastBlock = (srcPos + blockSize >= src.len);
+
+        // Write block header and data
+        const blockCompressed = try ZSTD_writeLiteralBlock(
+            op[0 .. @intFromPtr(oend) - @intFromPtr(op)],
+            src[srcPos .. srcPos + blockSize],
+            isLastBlock,
+        );
+        op += blockCompressed;
+        srcPos += blockSize;
+        hasWrittenBlock = true;
     }
 
-    // Write last empty block
-    const lastBlockSize = try ZSTD_writeLastEmptyBlock(op[0 .. @intFromPtr(oend) - @intFromPtr(op)]);
-    op += lastBlockSize;
+    // If we haven't written any block yet (empty input), write an empty final block
+    if (!hasWrittenBlock) {
+        const emptyBlockSize = try ZSTD_writeLiteralBlock(
+            op[0 .. @intFromPtr(oend) - @intFromPtr(op)],
+            &[_]u8{},
+            true,
+        );
+        op += emptyBlockSize;
+    }
 
     cctx.stage = .ending;
     return @intFromPtr(op) - @intFromPtr(dst.ptr);
@@ -703,28 +714,40 @@ fn ZSTD_writeLastEmptyBlock(dst: []u8) !usize {
     }
 
     // Last block + raw block type + 0 size
-    const cBlockHeader24: u32 = 1 | (@as(u32, 0) << 1); // bt_raw = 0
+    const cBlockHeader24: u32 = 1; // bit 0 = last block, bits 1-2 = 0 (raw type)
     MEM_writeLE24(dst.ptr, cBlockHeader24);
     return ZSTD_BLOCKHEADERSIZE;
 }
 
-/// Simple block compression (placeholder)
-fn ZSTD_compressBlock_simple(dst: []u8, src: []const u8) !usize {
-    // For now, just write as uncompressed block
+/// Write a literal (raw uncompressed) block
+fn ZSTD_writeLiteralBlock(dst: []u8, src: []const u8, isLastBlock: bool) !usize {
     if (dst.len < ZSTD_BLOCKHEADERSIZE + src.len) {
         return Error.DstSizeTooSmall;
     }
 
     var op = dst.ptr;
 
-    // Block header: not last block + raw block type + size
-    const cBlockHeader24: u32 = 0 | (@as(u32, 0) << 1) | (@as(u32, @intCast(src.len)) << 3); // bt_raw = 0
+    // Block header:
+    // - bit 0: lastBlock flag
+    // - bits 1-2: blockType (0 for raw)
+    // - bits 3-23: blockSize (21-bit)
+    const lastBlockBit: u32 = if (isLastBlock) 1 else 0;
+    const blockType: u32 = 0; // raw
+    const blockSize: u32 = @intCast(src.len);
+    const cBlockHeader24: u32 = lastBlockBit | (blockType << 1) | (blockSize << 3);
+
     MEM_writeLE24(op, cBlockHeader24);
     op += ZSTD_BLOCKHEADERSIZE;
 
-    // Copy data
+    // Copy data as-is (raw/literal block)
     @memcpy(op[0..src.len], src);
     return ZSTD_BLOCKHEADERSIZE + src.len;
+}
+
+/// Simple block compression (placeholder) - now just a wrapper for literal blocks
+fn ZSTD_compressBlock_simple(dst: []u8, src: []const u8) !usize {
+    // Write as uncompressed block (not the last block)
+    return ZSTD_writeLiteralBlock(dst, src, false);
 }
 
 /// Get maximum compressed size
@@ -957,46 +980,46 @@ test "version" {
     try std.testing.expect(std.mem.eql(u8, ZSTD_versionString(), "1.6.0"));
 }
 
-pub const FuzzContext = struct {
-    src_buf: []u8,
-    dst_buf: []u8,
-    decomp_buf: []u8,
-    pub fn testOne(self: @This(), smith: *std.testing.Smith) !void {
-        const src_len = smith.slice(self.src_buf);
-        const src = self.src_buf[0..src_len];
+test "fuzz compression roundtrip" {
+    const ctx = try std.testing.allocator.create(FuzzContext);
+    defer {
+        std.testing.allocator.destroy(ctx);
+    }
+    try std.testing.fuzz(ctx, FuzzContext.testOne, .{});
+}
 
-        const compressed_size = try ZSTD_compress(self.dst_buf, src, ZSTD_CLEVEL_DEFAULT);
+pub const FuzzContext = struct {
+    src_buf: [4096]u8,
+    dst_buf: [16 * std.math.pow(usize, 2, 20)]u8,
+    decomp_buf: [16 * std.math.pow(usize, 2, 20)]u8,
+    pub fn testOne(self: *@This(), smith: *std.testing.Smith) !void {
+        @disableInstrumentation();
+        const src_len = smith.valueRangeAtMost(u32, 0, self.src_buf.len);
+        const src = self.src_buf[0..@intCast(src_len)];
+
+        var rng = std.Random.DefaultPrng.init(smith.value(u64));
+        rng.random().bytes(src);
+
+        const clevel = smith.valueRangeAtMost(i32, 1, 32);
+
+        const compressed_size = try ZSTD_compress(&self.dst_buf, src, clevel);
         try std.testing.expect(compressed_size > 0);
         std.testing.expect(compressed_size <= ZSTD_compressBound(src.len)) catch |err| {
             std.log.err("error {}", .{err});
             std.log.err("expected: <={x}", .{ZSTD_compressBound(src.len)});
             std.log.err("got: {x}", .{compressed_size});
-            return;
+            return err;
         };
 
         var decomp_input = std.Io.Reader.fixed(self.dst_buf[0..compressed_size]);
-        var decompress: std.compress.zstd.Decompress = .init(&decomp_input, self.decomp_buf, .{ .window_len = 131072 });
+        var decompress: std.compress.zstd.Decompress = .init(&decomp_input, &self.decomp_buf, .{});
         try decompress.reader.fillMore();
         const decompressed = decompress.reader.buffered();
         std.testing.expect(std.mem.eql(u8, decompressed, src)) catch |err| {
             std.log.err("error {}", .{err});
             std.log.err("expected: {x}", .{src});
             std.log.err("got: {x}", .{decompressed});
-            return;
+            return err;
         };
     }
 };
-
-test "fuzz compression roundtrip" {
-    const ctx = FuzzContext{
-        .src_buf = try std.testing.allocator.alloc(u8, 16 * std.math.pow(usize, 2, 20)),
-        .dst_buf = try std.testing.allocator.alloc(u8, 16 * std.math.pow(usize, 2, 20)),
-        .decomp_buf = try std.testing.allocator.alloc(u8, 16 * std.math.pow(usize, 2, 20)),
-    };
-    defer {
-        std.testing.allocator.free(ctx.src_buf);
-        std.testing.allocator.free(ctx.dst_buf);
-        std.testing.allocator.free(ctx.decomp_buf);
-    }
-    try std.testing.fuzz(ctx, FuzzContext.testOne, .{});
-}
