@@ -38,6 +38,7 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{
         .name = "zstd_tests",
         .root_module = mod,
+        .use_llvm = true,
     });
     const test_run = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run zstd tests");
