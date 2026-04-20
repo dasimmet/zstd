@@ -421,13 +421,13 @@ pub const Context = struct {
         try reset(cctx, .reset_session_only);
 
         // Begin compression
-        const beginResult = try cctx.compressBegin(compression_level);
+        const beginResult = try cctx.begin(compression_level);
         if (beginResult != 0) {
             return Error.Generic;
         }
 
         // Compress the data
-        const compressResult = try compressEnd(cctx, dst, src);
+        const compressResult = try end(cctx, dst, src);
         return compressResult;
     }
 
@@ -446,8 +446,7 @@ pub const Context = struct {
         // TODO: Implement parameter reset
     }
 
-    /// Begin compression
-    pub fn compressBegin(cctx: *Context, compressionLevel: i32) !usize {
+    pub fn begin(cctx: *Context, compressionLevel: i32) !usize {
         // Set up parameters based on compression level
         const params = getCParams(compressionLevel, CONTENTSIZE_UNKNOWN, 0);
         cctx.appliedParams.cParams = params;
@@ -484,6 +483,79 @@ pub const Context = struct {
         cctx.isFirstBlock = true;
 
         return 0;
+    }
+
+    /// End compression
+    pub fn end(cctx: *Context, dst: []u8, src: []const u8) !usize {
+        if (cctx.stage != .init) {
+            return Error.StageWrong;
+        }
+
+        if (cctx.matchState == null) {
+            return Error.InitMissing;
+        }
+
+        var op = dst.ptr;
+        const oend = dst.ptr + dst.len;
+
+        // Write frame header
+        const fhSize = try writeFrameHeader(op[0..@min(FRAMEHEADERSIZE_MAX, @intFromPtr(oend) - @intFromPtr(op))], &cctx.appliedParams, src.len, 0);
+        op += fhSize;
+
+        // Compress data using match finding
+        var srcPos: usize = 0;
+        var hasWrittenBlock = false;
+
+        while (srcPos < src.len) {
+            const remainingSize = src.len - srcPos;
+            const blockSize = @min(cctx.blockSizeMax, remainingSize);
+            const isLastBlock = (srcPos + blockSize >= src.len);
+
+            // Try to compress the block
+            const blockData = src[srcPos .. srcPos + blockSize];
+
+            // Find matches using fast compression
+            _ = compressBlock_fast(&cctx.matchState.?, &cctx.seqStore, &cctx.rep, blockData);
+
+            // Encode the sequences into a compressed block
+            const blockCompressed = try encodeCompressedBlock(
+                op[0 .. @intFromPtr(oend) - @intFromPtr(op)],
+                &cctx.seqStore,
+                isLastBlock,
+            );
+
+            // If encoding fails or results are not better, use raw block
+            const useRawBlock = blockCompressed == 0 or blockCompressed >= blockSize;
+            const finalBlockSize = if (useRawBlock)
+                try writeLiteralBlock(
+                    op[0 .. @intFromPtr(oend) - @intFromPtr(op)],
+                    blockData,
+                    isLastBlock,
+                )
+            else
+                blockCompressed;
+
+            op += finalBlockSize;
+            srcPos += blockSize;
+            hasWrittenBlock = true;
+
+            // Reset seqStore for next block
+            cctx.seqStore.sequences = 0;
+            cctx.seqStore.lit = 0;
+        }
+
+        // If we haven't written any block yet (empty input), write an empty final block
+        if (!hasWrittenBlock) {
+            const emptyBlockSize = try writeLiteralBlock(
+                op[0 .. @intFromPtr(oend) - @intFromPtr(op)],
+                &[_]u8{},
+                true,
+            );
+            op += emptyBlockSize;
+        }
+
+        cctx.stage = .ending;
+        return @intFromPtr(op) - @intFromPtr(dst.ptr);
     }
 };
 
@@ -530,79 +602,6 @@ pub fn ZSTD_compress(
     defer ctx.deinit();
 
     return ctx.compress(dst, src, compression_level);
-}
-
-/// End compression
-pub fn compressEnd(cctx: *Context, dst: []u8, src: []const u8) !usize {
-    if (cctx.stage != .init) {
-        return Error.StageWrong;
-    }
-
-    if (cctx.matchState == null) {
-        return Error.InitMissing;
-    }
-
-    var op = dst.ptr;
-    const oend = dst.ptr + dst.len;
-
-    // Write frame header
-    const fhSize = try writeFrameHeader(op[0..@min(FRAMEHEADERSIZE_MAX, @intFromPtr(oend) - @intFromPtr(op))], &cctx.appliedParams, src.len, 0);
-    op += fhSize;
-
-    // Compress data using match finding
-    var srcPos: usize = 0;
-    var hasWrittenBlock = false;
-
-    while (srcPos < src.len) {
-        const remainingSize = src.len - srcPos;
-        const blockSize = @min(cctx.blockSizeMax, remainingSize);
-        const isLastBlock = (srcPos + blockSize >= src.len);
-
-        // Try to compress the block
-        const blockData = src[srcPos .. srcPos + blockSize];
-
-        // Find matches using fast compression
-        _ = compressBlock_fast(&cctx.matchState.?, &cctx.seqStore, &cctx.rep, blockData);
-
-        // Encode the sequences into a compressed block
-        const blockCompressed = try encodeCompressedBlock(
-            op[0 .. @intFromPtr(oend) - @intFromPtr(op)],
-            &cctx.seqStore,
-            isLastBlock,
-        );
-
-        // If encoding fails or results are not better, use raw block
-        const useRawBlock = blockCompressed == 0 or blockCompressed >= blockSize;
-        const finalBlockSize = if (useRawBlock)
-            try writeLiteralBlock(
-                op[0 .. @intFromPtr(oend) - @intFromPtr(op)],
-                blockData,
-                isLastBlock,
-            )
-        else
-            blockCompressed;
-
-        op += finalBlockSize;
-        srcPos += blockSize;
-        hasWrittenBlock = true;
-
-        // Reset seqStore for next block
-        cctx.seqStore.sequences = 0;
-        cctx.seqStore.lit = 0;
-    }
-
-    // If we haven't written any block yet (empty input), write an empty final block
-    if (!hasWrittenBlock) {
-        const emptyBlockSize = try writeLiteralBlock(
-            op[0 .. @intFromPtr(oend) - @intFromPtr(op)],
-            &[_]u8{},
-            true,
-        );
-        op += emptyBlockSize;
-    }
-
-    cctx.stage = .ending;
-    return @intFromPtr(op) - @intFromPtr(dst.ptr);
 }
 
 /// Get compression parameters for a level
