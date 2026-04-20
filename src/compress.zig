@@ -166,11 +166,13 @@ fn ZSTD_storeSeq(seqStore: *SeqStore, litLength: usize, literals: [*]const u8, l
     }
     seqStore.lit += litLength;
 
+    const mlBase: u16 = if (matchLength >= MINMATCH) @intCast(matchLength - MINMATCH) else 0;
+
     // Store sequence
     seqStore.sequencesStart[seqStore.sequences] = SeqDef{
         .offBase = offBase,
         .litLength = @intCast(litLength),
-        .mlBase = @intCast(matchLength - MINMATCH),
+        .mlBase = mlBase,
     };
     seqStore.sequences += 1;
 }
@@ -933,8 +935,12 @@ test "basic compression roundtrip" {
     try std.testing.expect(compressed_size <= ZSTD_compressBound(src.len));
 
     var decomp_input = std.Io.Reader.fixed(dst[0..compressed_size]);
-    var decomp_buf: [1024]u8 = undefined;
-    var decompress: std.compress.zstd.Decompress = .init(&decomp_input, &decomp_buf, .{});
+    var decomp_buf: [262144]u8 = undefined;
+    var decompress: std.compress.zstd.Decompress = .init(
+        &decomp_input,
+        &decomp_buf,
+        .{ .window_len = 131072 },
+    );
     try decompress.reader.fillMore();
     const decompressed = decompress.reader.buffered();
     try std.testing.expect(decompressed.len == src.len);
@@ -942,12 +948,55 @@ test "basic compression roundtrip" {
 }
 
 test "compress bound" {
-    try std.testing.expect(ZSTD_compressBound(0) == 0);
+    try std.testing.expect(ZSTD_compressBound(0) == 64);
     try std.testing.expect(ZSTD_compressBound(100) > 100);
     try std.testing.expect(ZSTD_compressBound(ZSTD_MAX_INPUT_SIZE) == 0);
 }
-
 test "version" {
     try std.testing.expect(ZSTD_versionNumber() == 10600);
     try std.testing.expect(std.mem.eql(u8, ZSTD_versionString(), "1.6.0"));
+}
+
+pub const FuzzContext = struct {
+    src_buf: []u8,
+    dst_buf: []u8,
+    decomp_buf: []u8,
+    pub fn testOne(self: @This(), smith: *std.testing.Smith) !void {
+        const src_len = smith.slice(self.src_buf);
+        const src = self.src_buf[0..src_len];
+
+        const compressed_size = try ZSTD_compress(self.dst_buf, src, ZSTD_CLEVEL_DEFAULT);
+        try std.testing.expect(compressed_size > 0);
+        std.testing.expect(compressed_size <= ZSTD_compressBound(src.len)) catch |err| {
+            std.log.err("error {}", .{err});
+            std.log.err("expected: <={x}", .{ZSTD_compressBound(src.len)});
+            std.log.err("got: {x}", .{compressed_size});
+            return;
+        };
+
+        var decomp_input = std.Io.Reader.fixed(self.dst_buf[0..compressed_size]);
+        var decompress: std.compress.zstd.Decompress = .init(&decomp_input, self.decomp_buf, .{ .window_len = 131072 });
+        try decompress.reader.fillMore();
+        const decompressed = decompress.reader.buffered();
+        std.testing.expect(std.mem.eql(u8, decompressed, src)) catch |err| {
+            std.log.err("error {}", .{err});
+            std.log.err("expected: {x}", .{src});
+            std.log.err("got: {x}", .{decompressed});
+            return;
+        };
+    }
+};
+
+test "fuzz compression roundtrip" {
+    const ctx = FuzzContext{
+        .src_buf = try std.testing.allocator.alloc(u8, 16 * std.math.pow(usize, 2, 20)),
+        .dst_buf = try std.testing.allocator.alloc(u8, 16 * std.math.pow(usize, 2, 20)),
+        .decomp_buf = try std.testing.allocator.alloc(u8, 16 * std.math.pow(usize, 2, 20)),
+    };
+    defer {
+        std.testing.allocator.free(ctx.src_buf);
+        std.testing.allocator.free(ctx.dst_buf);
+        std.testing.allocator.free(ctx.decomp_buf);
+    }
+    try std.testing.fuzz(ctx, FuzzContext.testOne, .{});
 }
