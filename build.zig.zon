@@ -1,7 +1,7 @@
 .{
     .name = .zstd,
     .version = "1.5.7-1",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0-dev.44+0177cb57c",
     .dependencies = .{
         .zstd = .{
             .url = "git+https://github.com/facebook/zstd.git?ref=v1.5.7#f8745da6ff1ad1e7bab384bd1f9d742439278e99",
