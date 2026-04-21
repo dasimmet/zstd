@@ -559,21 +559,6 @@ pub const Context = struct {
     }
 };
 
-/// Create compression context
-pub fn ZSTD_createCCtx() !*Context {
-    const ctx = try std.heap.page_allocator.create(Context);
-    ctx.* = try Context.init(std.heap.page_allocator);
-    return ctx;
-}
-
-/// Free compression context
-pub fn ZSTD_freeCCtx(cctx: ?*Context) void {
-    if (cctx) |ctx| {
-        ctx.deinit();
-        std.heap.page_allocator.destroy(ctx);
-    }
-}
-
 pub const ResetDirective = enum {
     reset_session_only,
     reset_parameters,
@@ -592,8 +577,7 @@ pub const cParameter = enum {
     // TODO: Add more parameters
 };
 
-/// Compress data
-pub fn ZSTD_compress(
+pub fn compressSlice(
     dst: []u8,
     src: []const u8,
     compression_level: i32,
@@ -774,12 +758,6 @@ fn encodeCompressedBlock(dst: []u8, seqStore: *const Sequence.Store, isLastBlock
     return 0; // Signal to use raw block fallback
 }
 
-/// Simple block compression (placeholder) - now just a wrapper for literal blocks
-fn compressBlock_simple(dst: []u8, src: []const u8) !usize {
-    // Write as uncompressed block (not the last block)
-    return writeLiteralBlock(dst, src, false);
-}
-
 /// Get maximum compressed size
 pub fn compressBound(src_size: usize) usize {
     if (src_size >= MAX_INPUT_SIZE) {
@@ -790,57 +768,6 @@ pub fn compressBound(src_size: usize) usize {
     else
         0;
     return bound;
-}
-
-/// Check if result is an error
-pub fn isError(result: usize) bool {
-    return result > MAX_INPUT_SIZE;
-}
-
-/// Get error code from result
-pub fn getErrorCode(result: usize) ErrorCode {
-    if (!isError(result)) {
-        return .no_error;
-    }
-    // TODO: Implement proper error code mapping
-    return .generic;
-}
-
-/// Error codes enum
-pub const ErrorCode = enum {
-    no_error,
-    generic,
-    prefix_unknown,
-    version_unsupported,
-    frameParameter_unsupported,
-    frameParameter_windowTooLarge,
-    corruption_detected,
-    checksum_wrong,
-    literals_headerWrong,
-    dictionary_corrupted,
-    dictionary_wrong,
-    bad_arguments,
-    maxCode,
-};
-
-/// Get error name
-pub fn getErrorName(result: usize) []const u8 {
-    const err_code = getErrorCode(result);
-    return switch (err_code) {
-        .no_error => "No error detected",
-        .generic => "Error (generic)",
-        .prefix_unknown => "Unknown frame descriptor",
-        .version_unsupported => "Version not supported",
-        .frameParameter_unsupported => "Unsupported frame parameter",
-        .frameParameter_windowTooLarge => "Frame parameter window too large",
-        .corruption_detected => "Corrupted block detected",
-        .checksum_wrong => "Restored data doesn't match checksum",
-        .literals_headerWrong => "Invalid literals header",
-        .dictionary_corrupted => "Dictionary is corrupted",
-        .dictionary_wrong => "Dictionary mismatch",
-        .bad_arguments => "Invalid parameter",
-        .maxCode => "Max error code",
-    };
 }
 
 // Sequence storage
@@ -996,7 +923,7 @@ pub const FuzzContext = struct {
 };
 
 fn testRoundTrip(src: []const u8, dst: []u8, clevel: i32, decomp_buf: []u8) !void {
-    const compressed_size = try ZSTD_compress(dst, src, clevel);
+    const compressed_size = try compressSlice(dst, src, clevel);
     try std.testing.expect(compressed_size > 0);
     std.testing.expect(compressed_size <= compressBound(src.len)) catch |err| {
         std.log.err("error {}", .{err});
