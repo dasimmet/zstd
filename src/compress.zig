@@ -960,7 +960,7 @@ test "basic compression roundtrip" {
     var dst: [1024]u8 = undefined;
     const decomp_buf = try std.testing.allocator.create([min_buffer_size]u8);
     defer std.testing.allocator.destroy(decomp_buf);
-    const clevel = 10;
+    const clevel = CLEVEL_DEFAULT;
 
     try testRoundTrip(src, &dst, clevel, decomp_buf);
 }
@@ -973,9 +973,8 @@ test "compress bound" {
 
 test "fuzz compression roundtrip" {
     const ctx = try std.testing.allocator.create(FuzzContext);
-    defer {
-        std.testing.allocator.destroy(ctx);
-    }
+    defer std.testing.allocator.destroy(ctx);
+
     try std.testing.fuzz(ctx, FuzzContext.testOne, .{});
 }
 
