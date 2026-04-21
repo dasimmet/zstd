@@ -7,24 +7,11 @@ const math = std.math;
 
 /// Error codes
 pub const Error = error{
-    Generic,
-    NoForwardProgress,
-    FrameParameterUnsupported,
-    FrameParameterWindowTooLarge,
-    CompressionParameterUnsupported,
-    InitMissing,
-    MemoryAllocation,
-    StageWrong,
     DstSizeTooSmall,
-    SrcSizeWrong,
-    CorruptionDetected,
-    ChecksumWrong,
-    LiteralHeaderWrong,
-    DictionaryCorrupted,
-    DictionaryWrong,
-    DictionaryCreationFailed,
-    MaxCode,
+    Generic,
+    InitMissing,
     OutOfMemory,
+    StageWrong,
 };
 
 /// Magic numbers
